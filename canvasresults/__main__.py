@@ -70,24 +70,25 @@ def test_module(arguments: argparse.Namespace) -> None:
     print('\n── Connecting to Canvas ────────────────────────────────────────────────────')
     canvas = CanvasResults(canvas_url=arguments.url, token=arguments.token)
 
-    print('\n── Selecting Canvas Course ─────────────────────────────────────────────────')
-    for _ in canvas.find_units(arguments.course): log.debug(f'Found matched Unit')
+    print('\n── Finding Canvas Course ───────────────────────────────────────────────────')
+    for progress in canvas.find_courses(arguments.course): log.debug(f'Matching Course: {progress['course_name']}')
 
-    log.info(f'Selecting most recent offering of Unit')
-    canvas.select_unit(canvas.units[0])
+    log.info(f'Selecting most recent offering of Course')
+    canvas.set_course(canvas.courses[0])
+
+    print('\n── Finding Course Assignments ──────────────────────────────────────────────')
+    for progress in canvas.find_assignments(): log.debug(f'Found Assignment: {progress["assignment_name"]}')
 
     print('\n── Validating Canvas Assignments ───────────────────────────────────────────')
-    canvas.validate_assessments(download_assessment_names=arguments.assignment, upload_assessment_names=[])
-    log.info(f'✅ All listed assignments found')
+    canvas.validate_assignments(assignment_names=arguments.assignment)
 
     print('\n── Downloading Student Details ─────────────────────────────────────────────')
     canvas.select_students()
 
+    # return
     print('\n── Downloading Gradebook ───────────────────────────────────────────────────')
-    count = 0
-    for result in canvas.download_gradebook():
-        count += result['increment']
-        print(f'\r\033[2KDownloading: {count / canvas.result_count:6.2%}% ({count}/{canvas.result_count}) {result['student_id']} - {result['assignment_name']}', end='', flush=True)
+    for result in canvas.download_gradebook(assignment_names=arguments.assignment):
+        print(f'\r\033[2KDownloading: {result['percentage']:6.2%}% ({result['count']}/{result['total']}) {result['student_id']} - {result['assignment_name']}', end='', flush=True)
 
     print()
 

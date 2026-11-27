@@ -43,7 +43,7 @@ class CanvasResults:
                 case _:
                     super().__init__(f'Unspecified Canvas error({exception.__class__.__name__}): {exception.message}')
 
-    class NoMatchingUnits(KeyError):
+    class NoMatchingCourses(KeyError):
         def __init__(self, search_key: str) -> None:
             super().__init__(f'No matching Units found for search key: {search_key}')
 
@@ -54,27 +54,27 @@ class CanvasResults:
 
     class _State(IntEnum):
         Initial = auto()
-        UnitList = auto()
-        UnitSet = auto()
-        AssessmentsValidated = auto()
+        CourseList = auto()
+        CourseSet = auto()
+        AssignmentList = auto()
         StudentsSelected = auto()
 
         def __str__(self):
             return self.name
 
-    _NONE_RESETS = {_State.Initial: ('_unit',),
-                    _State.UnitList: ('_unit',),
-                    _State.UnitSet: (),
-                    _State.AssessmentsValidated: (),
+    _NONE_RESETS = {_State.Initial: ('_course',),
+                    _State.CourseList: ('_course',),
+                    _State.CourseSet: (),
+                    _State.AssignmentList: (),
                     _State.StudentsSelected: ()
                     }
     """Variables that should be set to None when in this state"""
 
-    _DICT_RESETS = {_State.Initial: ('_download_assignments', '_upload_assignments', '_students', '_gradebook'),
-                    _State.UnitList: ('_download_assignments', '_upload_assignments', '_students', '_gradebook'),
-                    _State.UnitSet: ('_download_assignments', '_upload_assignments', '_students', '_gradebook'),
-                    _State.AssessmentsValidated: ('_students', '_gradebook'),
-                    _State.StudentsSelected: ('_gradebook')
+    _DICT_RESETS = {_State.Initial: ('_courses', '_all_assignments', '_students', '_gradebook'),
+                    _State.CourseList: ('_all_assignments', '_students', '_gradebook'),
+                    _State.CourseSet: ('_all_assignments', '_students', '_gradebook'),
+                    _State.AssignmentList: ('_students', '_gradebook'),
+                    _State.StudentsSelected: ('_gradebook',)
                     }
     """Variables that should be set to an empty dictionary when in this state"""
 
@@ -90,10 +90,11 @@ class CanvasResults:
             raise CanvasResults.CanvasError(e) from None
 
         # Create internal variables to store downloaded information from Canvas
-        self._units: list[canvasapi.course.Course] | None = None
-        self._unit: canvasapi.course.Course | None = None
-        self._download_assignments: dict[str, canvasapi.assignment.Assignment] = {}
-        self._upload_assignments: dict[str, canvasapi.assignment.Assignment] = {}
+        self._courses: list[canvasapi.course.Course] | None = None
+        self._course: canvasapi.course.Course | None = None
+        self._all_assignments: dict[str, canvasapi.assignment.Assignment] = {}
+        # self._download_assignments: dict[str, canvasapi.assignment.Assignment] = {}
+        # self._upload_assignments: dict[str, canvasapi.assignment.Assignment] = {}
         self._students: dict[str, canvasapi.user.User] = {}
         self._gradebook: dict[str, dict[str, int | float | None]] = {}
 
@@ -101,9 +102,9 @@ class CanvasResults:
 
     def _set_state(self, state: CanvasResults._State) -> None:
         """
-        Change the internal state of the CanvasManager, resetting all internal variables based on State
+        Change the internal state of CanvasResult, resetting all internal variables based on State
 
-        :param state: CanvasManager._State indicating new state
+        :param state: CanvasResult._State indicating new state
         """
         self._log.debug(f'Setting state to {state}')
         self._log.debug(f'  Resetting variables to None: {self._NONE_RESETS[state]}')
@@ -112,101 +113,107 @@ class CanvasResults:
         for var in self._DICT_RESETS[state]: setattr(self, var, {})
         self._state = state
 
-    def find_units(self, unit_filter: str = '') -> Iterator[dict[str, int]]:
+    def find_courses(self, course_filter: str = '') -> Iterator[dict[str, int]]:
         """
-        Find all Units accessible via this Token whose names match the given filter
+        Find all Courses accessible via this Token whose names match the given filter
 
-        The filtered Units is stored as a list of ``canvasapi.course.Course`` and is accessible via ``CanvasManager.units``
+        The filtered Courses are stored as a list of ``canvasapi.course.Course`` and is accessible via ``CanvasResult.courses``
 
-        :param unit_filter: String containing a partial match to the Canvas Course name. Should be the Unit Code
-        :return: Iterator that yields the current progress of fetching and filtering the Unit list accessible to the user
-        :raise CanvasManager.NoMatchingUnits: If no Canvas Courses can be found that match the filter
+        :param course_filter: String containing a partial match to the Canvas Course name. Should be the Course Code
+        :return: Iterator that yields the current progress of fetching and filtering the Course list accessible to the user
+        :raise CanvasResult.NoMatchingUnits: If no Canvas Courses can be found that match the filter
         """
-        self._log.info(f'Retrieving Canvas Unit Shells that match: {unit_filter}')
+        self._log.info(f'Retrieving Canvas Courses that match: {course_filter}')
 
         matched: list[canvasapi.course.Course] = []
-        for count, unit in enumerate(self._canvas.get_courses(per_page=100), start=1):
-            if unit_filter in unit.name:
-                matched.append(unit)
+        for count, course in enumerate(self._canvas.get_courses(per_page=100), start=1):
+            if course_filter in course.name:
+                matched.append(course)
                 # Only yield an update when a matched unit is found
-                yield {'total_units': count, 'matched_units': len(matched)}
+                yield {'matched_courses': len(matched), 'course_name': course.name}
 
-        self._units: list[canvasapi.course.Course] = sorted(matched, key=lambda u: u.created_at, reverse=True)
+        self._courses: list[canvasapi.course.Course] = sorted(matched, key=lambda u: u.created_at, reverse=True)
 
-        if not self._units: raise CanvasResults.NoMatchingUnits(unit_filter)
+        if not self._courses: raise CanvasResults.NoMatchingCourses(course_filter)
 
-        self._log.info(f'  Found: {', '.join([u.name for u in self._units])}')
-        self._set_state(CanvasResults._State.UnitList)
+        self._log.info(f'  Found: {', '.join([u.name for u in self._courses])}')
+        self._set_state(CanvasResults._State.CourseList)
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
-    def select_unit(self, unit: canvasapi.course.Course) -> None:
+    def set_course(self, course: canvasapi.course.Course) -> None:
         """
-        Specify which Unit in the previously retrieved unit list ``find_units()`` all future operations will use
+        Specify which Course in the previously retrieved courses list ``find_courses()`` all future operations will use
 
-        The selected Unit is stored as a ``canvasapi.course.Course`` and is accessible via ``CanvasManager.unit``
+        The selected Course is stored as a ``canvasapi.course.Course`` and is accessible via ``CanvasManager.course``
 
-        :param unit: Canvas Course to select - **MUST** match one of the Units returned by ``find_user_units()``
+        :param course: Canvas Course to select - **MUST** match one of the Units returned by ``find_courses()``
         :raise RuntimeError: If method is called when internal state is not valid to call this method
-        :raise KeyError: If selected Canvas Courses was not retrieved via earlier call to ``find_user_units()``
+        :raise ValueError: If selected Canvas Courses was not retrieved via earlier call to ``find_courses()``
         """
-        if self._state < CanvasResults._State.UnitList: raise RuntimeError(f'Attempting to select a Unit without first calling {self.__class__.__name__}.find_units()')
+        if self._state < CanvasResults._State.CourseList: raise RuntimeError(f'{self.__class__.__name__}.set_course(): Attempting to set a Course without first calling {self.__class__.__name__}.find_courses()')
 
-        if unit not in self._units: raise KeyError(f'{self.__class__.__name__}.select_unit(): Unit "{unit.name}" not in list of filtered Units')
+        if course not in self._courses: raise ValueError(f'{self.__class__.__name__}.set_course(): Unit "{course.name}" not in list of filtered Courses')
 
-        self._log.info(f'Setting Unit to: {unit.name}')
-        self._unit = unit
-        self._set_state(CanvasResults._State.UnitSet)
+        self._log.info(f'Setting Course to: {course.name}')
+        self._course = course
+        self._set_state(CanvasResults._State.CourseSet)
 
-    @validate_call()
-    def validate_assessments(self, download_assessment_names: list[NonEmptyStr], upload_assessment_names: list[NonEmptyStr]) -> None:
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def find_assignments(self) -> Iterator[dict[str, int | str]]:
         """
-        Validate that this Canvas Shell contains all the nominated assessments.
+        Find all Assignments in the currently selected Course
 
-        The nominated assessments are stored respectively in ``_download_assignments`` and `` _upload_assignments``. All assignments are stored as a dictionary
-        mapping the assignment name to an instance of type ``canvasapi.assignment.Assignment``
+        The Assignments are stored as a dictionary mapping the assignment name to a ``canvasapi.assignment.Assignment`` and is accessible via
+        ``CanvasResult.assignments``
 
-        :param download_assessment_names: List containing Canvas Assignment names that we plan to download results for
-        :param upload_assessment_names: List containing Canvas Assignment names that we plan to upload results to
+        :return: Iterator that yields the current progress of fetching and storing the assignments
+        """
+        if self._state < CanvasResults._State.CourseSet: raise RuntimeError(f'{self.__class__.__name__}.find_assignments(): Attempting to set a Course without first calling {self.__class__.__name__}.set_course()')
+
+        self._log.info(f'Retrieving Canvas Assignments for selected Course')
+        for assignment in self._course.get_assignments():
+            self._all_assignments[assignment.name] = assignment
+            yield {'assignment_count': len(self._all_assignments), 'assignment_name': assignment.name}
+
+        self._log.info(f'  Found: {', '.join([a.name for a in self._all_assignments.values()])}')
+        self._set_state(CanvasResults._State.AssignmentList)
+
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def validate_assignments(self, assignment_names: list[NonEmptyStr]) -> None:
+        """
+        Validate that the Course contains all the nominated assessments.
+
+        We need to check the provided list of assignment names to the assignments stored in ``_all_assignments``
+
+        :param assignment_names: List containing Canvas Assignment names that we need to validate
         :raise RuntimeError: If method is called when internal state is not valid to call this method
         :raise MissingAssignmentError: If not all required assessments were found in the Canvas Shell
         """
-        if self._state < CanvasResults._State.UnitSet: raise RuntimeError(f'Attempting to validate Assessments without first calling {self.__class__.__name__}.select_unit()')
+        if self._state < CanvasResults._State.AssignmentList: raise RuntimeError(f'{self.__class__.__name__}.validate_assignments(): Attempting to validate Assessments without first calling {self.__class__.__name__}.find_assignments()')
 
         # Will always succeed as _unit MUST be set for self._state to pass the test above
-        assert self._unit is not None
+        assert self._course is not None
 
         # Create set of all required assessments to look for and initialise internal lists of assignment information
-        required_names = set(download_assessment_names) | set(upload_assessment_names)
-        self._download_assignments = {}
-        self._upload_assignments = {}
+        required_names = set(assignment_names)
 
         # Number width to nicely format debug messages
         debug_msg_format_width = len(str(len(required_names)))
 
-        self._log.info(f'Checking that Canvas Shell contains all required Assignments({required_names})')
+        self._log.info(f'Checking that Course contains all required Assignments({required_names})')
 
-        # Download all assessment in this Unit Shell from Canvas
-        for assignment in self._unit.get_assignments():
-            # This is not one of the assessments we are validating, move to the next
-            if assignment.name not in required_names: continue
-
-            if assignment.name in download_assessment_names:
-                # Found a matching assessment to download, add to internal list
-                self._download_assignments[assignment.name] = assignment
-                self._log.debug(f'  ✅ Found Download Assignment ({len(self._download_assignments):>{debug_msg_format_width}}/{len(download_assessment_names)}): {assignment.name}')
-
-            if assignment.name in upload_assessment_names:
-                # Found a matching assessment to upload results to, add to internal list
-                self._upload_assignments[assignment.name] = assignment
-                self._log.debug(f'  ✅ Found   Upload Assignment ({len(self._upload_assignments):>{debug_msg_format_width}}/{len(upload_assessment_names)}): {assignment.name}')
+        # For each requested assignment, check if it is in self._all_assignments
+        for count, assignment in enumerate(assignment_names, start=1):
+            if assignment in self._all_assignments:
+                self._log.debug(f'  ✅ Found Assignment ({count:>{debug_msg_format_width}}/{len(assignment_names)}): {assignment}')
+            else:
+                self._log.debug(f'  ❌ Assignment not found ({count:>{debug_msg_format_width}}/{len(assignment_names)}): {assignment}')
 
         # Check we found all the required assessments and raise an exception if not
-        found_names: set[str] = (self._download_assignments.keys() | self._upload_assignments.keys())
-        missing_names = sorted(required_names - found_names)
+        missing_names: set[str] = set(assignment_names) - set(self._all_assignments)
         if missing_names: raise CanvasResults.MissingAssignmentError(', '.join(missing_names))
 
-        self._set_state(CanvasResults._State.AssessmentsValidated)
-
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def select_students(self, student_filter: list[str] | None = None, section_filter: list[str] | None = None) -> None:
         """
         Select students from the Canvas Shell to download or upload results for. Students can be filtered to not extract the entire list of enrolled students
@@ -220,15 +227,18 @@ class CanvasResults:
                                those students are also in ``section_filter``
         :raise RuntimeError: If method is called when internal state is not valid to call this method
         """
-        if self._state < CanvasResults._State.AssessmentsValidated: raise RuntimeError(f'Attempting to select students without first calling {self.__class__.__name__}.validate_assessments()')
+        if self._state < CanvasResults._State.AssignmentList: raise RuntimeError(f'{self.__class__.__name__}.select_students(): Attempting to select students without first calling {self.__class__.__name__}.find_assignments()')
 
-        self._log.info(f'Downloading selected students records from {self.unit.name}')
+        # Will always succeed as _course MUST be set for self._state to pass the test above
+        assert self._course is not None
 
-        if any(enrollment.type == "StudentEnrollment" for enrollment in self._unit.get_enrollments(user_id=self._user.id)):
-            self._log.info(f'  🧑‍🎓 Current user ({self._user}) is enrolled in {self._unit.name} as a Student')
+        self._log.info(f'Downloading selected students records from {self._course.name}')
+
+        if any(enrollment.type == "StudentEnrollment" for enrollment in self._course.get_enrollments(user_id=self._user.id)):
+            self._log.info(f'  🧑‍🎓 Current user ({self._user}) is enrolled in {self._course.name} as a Student')
 
             self._students = {u.sis_user_id: u
-                              for u in self._unit.get_users(enrollment_type=["student"], enrollment_state=["active"])
+                              for u in self._course.get_users(enrollment_type=["student"], enrollment_state=["active"])
                               if u.id == self._user.id
                               }
         else:
@@ -241,7 +251,7 @@ class CanvasResults:
             if section_filter:
                 self._log.debug(f'  Filtering for students enrolled in section(s): {section_filter}')
                 section_students = {enrollment.sis_user_id
-                                    for section in self._unit.get_sections()
+                                    for section in self._course.get_sections()
                                     if any(sf in section.name for sf in section_filter)
                                     for enrollment in section.get_enrollments(type='StudentEnrollment')
                                     }
@@ -250,7 +260,7 @@ class CanvasResults:
                 self._log.debug(f'  IDs matching all filters: {selected_ids}')
 
             self._students = {u.sis_user_id: u
-                              for u in self._unit.get_users(enrollment_type=["student"], enrollment_state=["active"])
+                              for u in self._course.get_users(enrollment_type=["student"], enrollment_state=["active"])
                               if selected_ids is None or u.sis_user_id in selected_ids
                               }
 
@@ -262,7 +272,8 @@ class CanvasResults:
 
         self._set_state(CanvasResults._State.StudentsSelected)
 
-    def download_gradebook(self) -> Iterator[dict[str, int | float | str | None]]:
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def download_gradebook(self, assignment_names: list[NonEmptyStr]) -> Iterator[dict[str, int | float | str | None]]:
         """
         Download all selected ``_download_assignments`` for all previously selected ``_students`` and store Canvas Gradebook results in the internal gradebook (``_gradebook``)
 
@@ -271,24 +282,27 @@ class CanvasResults:
 
         :raise RuntimeError: If method is called when internal state is not valid
         """
-        if self._state < CanvasResults._State.StudentsSelected: raise RuntimeError(f'Attempting to download Gradebook without first calling {self.__class__.__name__}.select_students()')
+        if self._state < CanvasResults._State.StudentsSelected: raise RuntimeError(f'{self.__class__.__name__}.download_gradebook(): Attempting to download Gradebook without first calling {self.__class__.__name__}.select_students()')
 
-        # Will always succeed as _unit MUST be set for self._state to pass the test above
-        assert self._unit is not None
+        # Will always succeed as _course MUST be set for self._state to pass the test above
+        assert self._course is not None
 
-        if not self._download_assignments: raise RuntimeError(f'No downloadable assignment names were provided to {self.__class__.__name__}.validate_assessments()')
+        if not assignment_names: raise RuntimeError(f'No downloadable assignment names were provided to {self.__class__.__name__}.download_gradebook()')
 
-        self._log.info(f'Downloading Assessment results from {self.unit.name}')
+        self._log.info(f'Downloading Assessment results from {self._course.name}')
 
         # Map Canvas Student ID to actual Student ID (SIS ID)
         student_id_map: dict[int, str] = {student.id: student_sis_id for student_sis_id, student in self._students.items()}
         # Map Canvas Assignment ID to the actual assignment details
-        assign_by_id: dict[int, canvasapi.assignment.Assignment] = {assignment.id: assignment for assignment in self._download_assignments.values()}
+        assign_by_id: dict[int, canvasapi.assignment.Assignment] = {assignment.id: assignment for assignment in self._all_assignments.values() if assignment.name in assignment_names}
         # Prepopulate gradebook for each student and assignment with a grade of None
-        self._gradebook = {student: {assignment_name: None for assignment_name in self._download_assignments} for student in self._students.keys()}
+        self._gradebook = {student: {assignment_name: None for assignment_name in assignment_names} for student in self._students.keys()}
+
+        count: int = 0
+        total_results = len(assignment_names) * len(self._students)
 
         # Manual testing seems to indicate that 158 students is the limit at which there are too many students, so to be safe if we have >100 we need to get all students and skip any we don't want
-        for sub in self._unit.get_multiple_submissions(student_ids=list(student_id_map) if len(student_id_map) <= 100 else 'all', assignment_ids=list(assign_by_id.keys())):
+        for sub in self._course.get_multiple_submissions(student_ids=list(student_id_map) if len(student_id_map) <= 100 else 'all', assignment_ids=list(assign_by_id.keys())):
             # Retrieve the student ID for this submission using the mapping - None if student does not exist
             student_id = student_id_map.get(sub.user_id)
             # Student ID for submission not a valid student, likely "Test Student" in Canvas, ignore and move onto next
@@ -302,7 +316,8 @@ class CanvasResults:
             self._gradebook[student_id][assignment_name] = score
 
             # Yield back one student result to manage progress update
-            yield {'increment': 1, 'student_id': student_id, 'assignment_name': assignment_name, 'score': score}
+            count += 1
+            yield {'increment': 1, 'count': count, 'total': total_results, 'percentage': count / total_results, 'student_id': student_id, 'assignment_name': assignment_name, 'score': score}
 
         for student in self._students.keys(): self._log.debug(f'Student({self._students[student].sis_user_id}) Results({self._gradebook[self._students[student].sis_user_id]})')
 
@@ -366,16 +381,22 @@ class CanvasResults:
         return self._user
 
     @property
-    def units(self) -> list[canvasapi.course.Course]:
-        """:return: List of Units matching Unit Code filter"""
-        if self._units is None: raise RuntimeError(f'Attempting to retrieve CanvasManager.units without first calling {self.__class__.__name__}.find_units()')
-        return self._units
+    def courses(self) -> list[canvasapi.course.Course]:
+        """:return: List of Courses matching provided Course filter"""
+        if not self._courses: raise RuntimeError(f'Attempting to retrieve {self.__class__.__name__}.courses without first calling {self.__class__.__name__}.find_courses()')
+        return self._courses
 
     @property
-    def unit(self) -> canvasapi.course.Course:
-        """:return: Selected Canvas unit"""
-        if self._unit is None: raise RuntimeError(f'Attempting to retrieve CanvasManager.unit without first calling {self.__class__.__name__}.select_unit()')
-        return self._unit
+    def course(self) -> canvasapi.course.Course:
+        """:return: Selected Canvas Course"""
+        if self._course is None: raise RuntimeError(f'Attempting to retrieve {self.__class__.__name__}.course without first calling {self.__class__.__name__}.set_course()')
+        return self._course
+
+    @property
+    def assignments(self) -> dict[str, canvasapi.assignment.Assignment]:
+        """:return: Dictionary mapping Assignment name to Assignment instances for all assignments in the selected Course"""
+        if not self._all_assignments: raise RuntimeError(f'Attempting to retrieve {self.__class__.__name__}.assignments without first calling {self.__class__.__name__}.find_assignments()')
+        return self._all_assignments
 
     @property
     def students(self) -> dict[str, canvasapi.user.User]:

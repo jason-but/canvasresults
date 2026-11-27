@@ -92,3 +92,10 @@ display the downloaded Gradebook results to screen.
 ---
 
 # `CanvasResults` API Documentation
+
+Coming after finalisation of all features
+
+For now, review the code in:
+
+ - `__main__.py`
+ - `canvasresults.py`

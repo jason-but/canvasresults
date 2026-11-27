@@ -43,11 +43,11 @@ class CanvasResults:
                 case _:
                     super().__init__(f'Unspecified Canvas error({exception.__class__.__name__}): {exception.message}')
 
-    class NoMatchingCourses(KeyError):
+    class NoMatchingCourses(LookupError):
         def __init__(self, search_key: str) -> None:
-            super().__init__(f'No matching Units found for search key: {search_key}')
+            super().__init__(f'No matching Courses found for search key: {search_key}')
 
-    class MissingAssignmentError(KeyError):
+    class MissingAssignmentError(ValueError):
         def __init__(self, assignment: str):
             super().__init__(f'Unable to locate required assignment in Canvas shell: {assignment}')
             self.assignment = assignment
@@ -90,11 +90,9 @@ class CanvasResults:
             raise CanvasResults.CanvasError(e) from None
 
         # Create internal variables to store downloaded information from Canvas
-        self._courses: list[canvasapi.course.Course] | None = None
+        self._courses: list[canvasapi.course.Course] = []
         self._course: canvasapi.course.Course | None = None
         self._all_assignments: dict[str, canvasapi.assignment.Assignment] = {}
-        # self._download_assignments: dict[str, canvasapi.assignment.Assignment] = {}
-        # self._upload_assignments: dict[str, canvasapi.assignment.Assignment] = {}
         self._students: dict[str, canvasapi.user.User] = {}
         self._gradebook: dict[str, dict[str, int | float | None]] = {}
 
@@ -102,9 +100,9 @@ class CanvasResults:
 
     def _set_state(self, state: CanvasResults._State) -> None:
         """
-        Change the internal state of CanvasResult, resetting all internal variables based on State
+        Change the internal state of CanvasResults, resetting all internal variables based on State
 
-        :param state: CanvasResult._State indicating new state
+        :param state: CanvasResults._State indicating new state
         """
         self._log.debug(f'Setting state to {state}')
         self._log.debug(f'  Resetting variables to None: {self._NONE_RESETS[state]}')
@@ -117,11 +115,11 @@ class CanvasResults:
         """
         Find all Courses accessible via this Token whose names match the given filter
 
-        The filtered Courses are stored as a list of ``canvasapi.course.Course`` and is accessible via ``CanvasResult.courses``
+        The filtered Courses are stored as a list of ``canvasapi.course.Course`` and is accessible via ``CanvasResults.courses``
 
         :param course_filter: String containing a partial match to the Canvas Course name. Should be the Course Code
         :return: Iterator that yields the current progress of fetching and filtering the Course list accessible to the user
-        :raise CanvasResult.NoMatchingUnits: If no Canvas Courses can be found that match the filter
+        :raise CanvasResults.NoMatchingCourses: If no Canvas Courses can be found that match the filter
         """
         self._log.info(f'Retrieving Canvas Courses that match: {course_filter}')
 
@@ -129,7 +127,7 @@ class CanvasResults:
         for count, course in enumerate(self._canvas.get_courses(per_page=100), start=1):
             if course_filter in course.name:
                 matched.append(course)
-                # Only yield an update when a matched unit is found
+                # Only yield an update when a matched course is found
                 yield {'matched_courses': len(matched), 'course_name': course.name}
 
         self._courses: list[canvasapi.course.Course] = sorted(matched, key=lambda u: u.created_at, reverse=True)
@@ -144,31 +142,33 @@ class CanvasResults:
         """
         Specify which Course in the previously retrieved courses list ``find_courses()`` all future operations will use
 
-        The selected Course is stored as a ``canvasapi.course.Course`` and is accessible via ``CanvasManager.course``
+        The selected Course is stored as a ``canvasapi.course.Course`` and is accessible via ``CanvasResults.course``
 
-        :param course: Canvas Course to select - **MUST** match one of the Units returned by ``find_courses()``
+        :param course: Canvas Course to select - **MUST** match one of the Courses returned by ``find_courses()``
         :raise RuntimeError: If method is called when internal state is not valid to call this method
         :raise ValueError: If selected Canvas Courses was not retrieved via earlier call to ``find_courses()``
         """
         if self._state < CanvasResults._State.CourseList: raise RuntimeError(f'{self.__class__.__name__}.set_course(): Attempting to set a Course without first calling {self.__class__.__name__}.find_courses()')
 
-        if course not in self._courses: raise ValueError(f'{self.__class__.__name__}.set_course(): Unit "{course.name}" not in list of filtered Courses')
+        if course not in self._courses: raise ValueError(f'{self.__class__.__name__}.set_course(): Course "{course.name}" not in list of filtered Courses')
 
         self._log.info(f'Setting Course to: {course.name}')
         self._course = course
         self._set_state(CanvasResults._State.CourseSet)
 
-    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def find_assignments(self) -> Iterator[dict[str, int | str]]:
         """
         Find all Assignments in the currently selected Course
 
         The Assignments are stored as a dictionary mapping the assignment name to a ``canvasapi.assignment.Assignment`` and is accessible via
-        ``CanvasResult.assignments``
+        ``CanvasResults.assignments``
 
         :return: Iterator that yields the current progress of fetching and storing the assignments
         """
         if self._state < CanvasResults._State.CourseSet: raise RuntimeError(f'{self.__class__.__name__}.find_assignments(): Attempting to set a Course without first calling {self.__class__.__name__}.set_course()')
+
+        # Will always succeed as _course MUST be set for self._state to pass the test above
+        assert self._course is not None
 
         self._log.info(f'Retrieving Canvas Assignments for selected Course')
         for assignment in self._course.get_assignments():
@@ -181,20 +181,20 @@ class CanvasResults:
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def validate_assignments(self, assignment_names: list[NonEmptyStr]) -> None:
         """
-        Validate that the Course contains all the nominated assessments.
+        Validate that the Course contains all the nominated assignments.
 
         We need to check the provided list of assignment names to the assignments stored in ``_all_assignments``
 
         :param assignment_names: List containing Canvas Assignment names that we need to validate
         :raise RuntimeError: If method is called when internal state is not valid to call this method
-        :raise MissingAssignmentError: If not all required assessments were found in the Canvas Shell
+        :raise MissingAssignmentError: If not all required assignments were found in the Canvas Shell
         """
-        if self._state < CanvasResults._State.AssignmentList: raise RuntimeError(f'{self.__class__.__name__}.validate_assignments(): Attempting to validate Assessments without first calling {self.__class__.__name__}.find_assignments()')
+        if self._state < CanvasResults._State.AssignmentList: raise RuntimeError(f'{self.__class__.__name__}.validate_assignments(): Attempting to validate Assignments without first calling {self.__class__.__name__}.find_assignments()')
 
-        # Will always succeed as _unit MUST be set for self._state to pass the test above
+        # Will always succeed as _course MUST be set for self._state to pass the test above
         assert self._course is not None
 
-        # Create set of all required assessments to look for and initialise internal lists of assignment information
+        # Create set of all required assignments to look for and initialise internal lists of assignment information
         required_names = set(assignment_names)
 
         # Number width to nicely format debug messages
@@ -205,13 +205,13 @@ class CanvasResults:
         # For each requested assignment, check if it is in self._all_assignments
         for count, assignment in enumerate(assignment_names, start=1):
             if assignment in self._all_assignments:
-                self._log.debug(f'  ✅ Found Assignment ({count:>{debug_msg_format_width}}/{len(assignment_names)}): {assignment}')
+                self._log.debug(f'  ✅ Found Assignment ({count:>{debug_msg_format_width}}/{len(required_names)}): {assignment}')
             else:
-                self._log.debug(f'  ❌ Assignment not found ({count:>{debug_msg_format_width}}/{len(assignment_names)}): {assignment}')
+                self._log.debug(f'  ❌ Assignment not found ({count:>{debug_msg_format_width}}/{len(required_names)}): {assignment}')
 
-        # Check we found all the required assessments and raise an exception if not
-        missing_names: set[str] = set(assignment_names) - set(self._all_assignments)
-        if missing_names: raise CanvasResults.MissingAssignmentError(', '.join(missing_names))
+        # Check we found all the required assignments and raise an exception if not
+        missing_names: set[str] = required_names - set(self._all_assignments)
+        if missing_names: raise CanvasResults.MissingAssignmentError(', '.join(sorted(missing_names)))
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def select_students(self, student_filter: list[str] | None = None, section_filter: list[str] | None = None) -> None:
@@ -278,7 +278,7 @@ class CanvasResults:
         Download all selected ``_download_assignments`` for all previously selected ``_students`` and store Canvas Gradebook results in the internal gradebook (``_gradebook``)
 
         The gradebook is stored as a dictionary mapping Canvas Student ID to a dictionary mapping the Canvas Assignment Name to the allocated score/grade
-        The gradebook is accessing via ``CanvasManager.portfolio_gradebook``
+        The gradebook is accessing via ``CanvasResults.portfolio_gradebook``
 
         :raise RuntimeError: If method is called when internal state is not valid
         """
@@ -289,7 +289,10 @@ class CanvasResults:
 
         if not assignment_names: raise RuntimeError(f'No downloadable assignment names were provided to {self.__class__.__name__}.download_gradebook()')
 
-        self._log.info(f'Downloading Assessment results from {self._course.name}')
+        missing_names: set[str] = set(assignment_names) - set(self._all_assignments)
+        if missing_names: raise CanvasResults.MissingAssignmentError(', '.join(sorted(missing_names)))
+
+        self._log.info(f'Downloading Assignment results from {self._course.name}')
 
         # Map Canvas Student ID to actual Student ID (SIS ID)
         student_id_map: dict[int, str] = {student.id: student_sis_id for student_sis_id, student in self._students.items()}
@@ -336,7 +339,7 @@ class CanvasResults:
         """
         if self._state < CanvasResults._State.StudentsSelected: raise RuntimeError(f'Attempting to upload results Gradebook without first calling {self.__class__.__name__}.select_students()')
 
-        if not self._upload_assignments: raise RuntimeError(f'No uploadable assignment names were provided to {self.__class__.__name__}.validate_assessments()')
+        if not self._upload_assignments: raise RuntimeError(f'No uploadable assignment names were provided to {self.__class__.__name__}.validate_assignments()')
 
         for sis_id, student_results in results.items():
             student = self._students.get(sis_id)
@@ -401,25 +404,26 @@ class CanvasResults:
     @property
     def students(self) -> dict[str, canvasapi.user.User]:
         """:return: Selected students as a dictionary mapping Student ID to Canvas User"""
-        if len(self._students) == 0: raise RuntimeError(f'Attempting to retrieve CanvasManager.students without first calling {self.__class__.__name__}.select_students()')
+        if len(self._students) == 0: raise RuntimeError(f'Attempting to retrieve CanvasResults.students without first calling {self.__class__.__name__}.select_students()')
         return self._students
 
     @property
     def result_count(self) -> int:
-        """:return: Calculated number of Portfolio Results that exist or need to be downloaded"""
-        if len(self._students) == 0: raise RuntimeError(f'Attempting to retrieve CanvasManager.students without first calling {self.__class__.__name__}.select_students()')
-        return len(self._download_assignments) * len(self._students)
+        """:return: Calculated number of results in the downloaded gradebook"""
+        if not self._gradebook: raise RuntimeError(f'No results downloaded to return information for')
+        return sum(len(results) for results in self._gradebook.values())
 
     @property
     def gradebook(self) -> dict[str, dict[str, int | float | None]]:
         """:return: Dictionary mapping Student ID to a dictionary mapping the Canvas Assignment Name to the allocated score/grade for that student"""
-        if len(self._gradebook) == 0: raise RuntimeError(f'Attempting to retrieve CanvasManager.portfolio_gradebook without first calling {self.__class__.__name__}.download_gradebook()')
+        if len(self._gradebook) == 0: raise RuntimeError(f'Attempting to retrieve CanvasResults.gradebook without first calling {self.__class__.__name__}.download_gradebook()')
         return self._gradebook
 
     @property
     def gradebook_str(self) -> str:
         """:return: String representation of the Downloaded Gradebook for display purposes"""
-        return f'Downloaded {self.result_count} ({len(self._students)} students x {len(self._download_assignments)} assessments) Gradebook results'
+        if not self._gradebook: raise RuntimeError(f'No results downloaded to return information for')
+        return f'Downloaded {self.result_count} ({len(self._gradebook)} students x {len(next(iter(self._gradebook.values())))} assignments) Gradebook results'
 
 # Sample code to delete an existing canvas comment
 # def update_automated_result(canvas, course, assignment, user_id, new_grade, new_comment):
